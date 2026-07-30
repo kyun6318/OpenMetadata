@@ -97,6 +97,8 @@ class DistributedSearchIndexExecutorTest {
     executor = new DistributedSearchIndexExecutor(collectionDAO);
     setField("coordinator", coordinator);
     setField("recoveryManager", recoveryManager);
+    // Unit tests exercise the force-cancel logic, not the participant-drain grace timing.
+    setField("participantDrainTimeoutMs", 0L);
   }
 
   @AfterEach
@@ -968,6 +970,46 @@ class DistributedSearchIndexExecutorTest {
       verify(coordinator).forceCompleteProcessingPartitions(jobId);
       verify(metrics).recordJobStopped(timerSample);
     }
+  }
+
+  @Test
+  void driveJobToTerminalStateForceCancelsStragglersOnNonStoppingDrainedJob() throws Exception {
+    UUID jobId = UUID.randomUUID();
+    // A non-STOPPING job whose workers drained, but a participant's partition stays PROCESSING and
+    // the job never reaches a terminal state on its own.
+    when(coordinator.getJob(jobId))
+        .thenReturn(
+            Optional.of(SearchIndexJob.builder().id(jobId).status(IndexJobStatus.RUNNING).build()));
+    when(coordinator.getPartitions(jobId, PartitionStatus.PROCESSING))
+        .thenReturn(List.of(partition(jobId, "table", PartitionStatus.PROCESSING)));
+
+    invokePrivate(
+        "driveJobToTerminalState", new Class<?>[] {UUID.class, boolean.class}, jobId, true);
+
+    // The straggler must be force-cancelled so the job reaches a terminal state and the finalizer
+    // promotes its staged index — instead of the job hanging RUNNING with the finalizer never
+    // running and the entity kept on its stale pre-reindex index. Pre-fix, force-completion only
+    // ran for STOPPING jobs, so this straggler was left PROCESSING forever.
+    verify(coordinator).forceCompleteProcessingPartitions(jobId);
+    verify(coordinator).checkAndUpdateJobCompletion(jobId);
+  }
+
+  @Test
+  void driveJobToTerminalStateDoesNotForceCancelWhenNoProcessingPartitionsRemain()
+      throws Exception {
+    UUID jobId = UUID.randomUUID();
+    when(coordinator.getJob(jobId))
+        .thenReturn(
+            Optional.of(SearchIndexJob.builder().id(jobId).status(IndexJobStatus.RUNNING).build()));
+    when(coordinator.getPartitions(jobId, PartitionStatus.PROCESSING)).thenReturn(List.of());
+
+    invokePrivate(
+        "driveJobToTerminalState", new Class<?>[] {UUID.class, boolean.class}, jobId, true);
+
+    // Nothing is still processing, so there is nothing to force-cancel; the completion check alone
+    // takes the job terminal.
+    verify(coordinator, never()).forceCompleteProcessingPartitions(jobId);
+    verify(coordinator).checkAndUpdateJobCompletion(jobId);
   }
 
   @Test
