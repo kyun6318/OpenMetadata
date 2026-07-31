@@ -337,7 +337,7 @@ jobs:
     - name: Slack on Failure
       if: ${{ always() && !cancelled() && env.DEBUG == 'false' && failure() }}
       continue-on-error: true
-      uses: slackapi/slack-github-action@v4
+      uses: slackapi/slack-github-action@v4.0.0
       with:
         webhook: ${{ secrets.E2E_SLACK_WEBHOOK }}
         webhook-type: incoming-webhook
